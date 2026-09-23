@@ -1,5 +1,6 @@
 ---
 - name: Install systemd unit to control sriov-manage
+  register: _edpm_accel_drivers_nvidia_sriov_manage_service_installed
   become: true
   ansible.builtin.copy:
     dest: "/etc/systemd/system/edpm_nvidia_sriov_manage@.service"
@@ -14,19 +15,23 @@
       Description = Enable Nvidia GPU virtual functions. Should be triggered via edpm_nvidia_sriov_manage@.path to ensure GPU is ready for sriov operations.
       [Service]
       Type = oneshot
-      User = root
-      Group = root
-      ExecStart = /usr/lib/nvidia/sriov-manage -e %i
-      TimeoutSec = 120
-      Slice = system.slice
-      CPUAccounting = True
-      BlockIOAccounting = True
-      MemoryAccounting = True
-      TasksAccounting = True
+      # Override the command to execute via a shell environment
+      # Handle the edge case where VFs are created on PCI path but mdevs have been yet populated
+      ExecStartPre = /bin/bash -c '/usr/lib/nvidia/sriov-manage -d %i'
+      ExecStart = /bin/bash -c '/usr/lib/nvidia/sriov-manage -e %i'
+      ExecStartPost = /bin/sleep 3
+      ExecStartPost = /bin/bash -c 'test -n "$(ls -A /sys/class/mdev_bus)"'
+      TimeoutSec = 180
       RemainAfterExit = True
+      Restart=on-failure
+      RestartSec=10s
+      [Install]
+      WantedBy = multi-user.target
+      DefaultInstance = %i
 
 - name: Install systemd unit to cause sriov-manage to run when sriov_numvfs appears
   become: true
+  register: _edpm_accel_drivers_nvidia_sriov_manage_path_installed
   ansible.builtin.copy:
     dest: "/etc/systemd/system/edpm_nvidia_sriov_manage@.path"
     owner: root
@@ -40,6 +45,9 @@
       Description = Wait for sriov_numvfs to exist before running sriov-manage
       [Path]
       PathExists=/sys/bus/pci/devices/%i/sriov_numvfs
+      [Install]
+      WantedBy = multi-user.target
+      DefaultInstance = %i
 
 - name: Remove MIG units and reset GPUs no longer in geometry list
   ansible.builtin.include_tasks: nvidia_mig_partitioning_cleanup.yml

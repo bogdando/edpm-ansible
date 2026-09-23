@@ -1,20 +1,20 @@
 ---
 - name: Get GPU PCI BDF for nvidia-sriov-manage dependency
   become: true
-  ansible.builtin.command:
-    cmd: nvidia-smi -i {{ _edpm_accel_drivers_nvidia_mig_gpu_index }} --query-gpu=pci.bus_id --format=csv,noheader,nounits
+  ansible.builtin.shell:
+    cmd: set -o pipefail && nvidia-smi -i {{  _edpm_accel_drivers_nvidia_mig_gpu_index }} --query-gpu=pci.bus_id --format=csv,noheader,nounits | cut -c 5-
   register: _edpm_accel_drivers_nvidia_mig_gpu_pci_bus_id
+  failed_when: _edpm_accel_drivers_nvidia_mig_gpu_pci_bus_id.rc != 0 or not _edpm_accel_drivers_nvidia_mig_gpu_pci_bus_id.stdout.startswith('0000')
   changed_when: false
 
-- name: Normalize BDF to short form for systemd instance
+- name: Set fact for MIG GPU index
   ansible.builtin.set_fact:
-    _edpm_accel_drivers_nvidia_mig_bdf_sriov: >-
+    _edpm_accel_drivers_nvidia_mig_bdf_sriov: "{{ _edpm_accel_drivers_nvidia_mig_gpu_pci_bus_id.stdout | trim }}"
+    _edpm_accel_drivers_nvidia_mig_bdf_sriov_base: >-
       {{
-        (_edpm_accel_drivers_nvidia_mig_gpu_pci_bus_id.stdout | trim).split(':')[0][-4:]
+        (_edpm_accel_drivers_nvidia_mig_gpu_pci_bus_id.stdout | trim).split(':')[0]
       }}:{{
         (_edpm_accel_drivers_nvidia_mig_gpu_pci_bus_id.stdout | trim).split(':')[1]
-      }}:{{
-        (_edpm_accel_drivers_nvidia_mig_gpu_pci_bus_id.stdout | trim).split(':')[2]
       }}
 
 - name: Install systemd unit to apply MIG layout for GPU {{ _edpm_accel_drivers_nvidia_mig_gpu_index }}
@@ -32,9 +32,27 @@
 - name: Enable edpm_nvidia_mig_apply service for GPU {{ _edpm_accel_drivers_nvidia_mig_gpu_index }}
   become: true
   ansible.builtin.systemd:
-    name: "edpm_nvidia_mig_apply_{{ _edpm_accel_drivers_nvidia_mig_gpu_index }}"
+    name: "edpm_nvidia_mig_apply_{{ _edpm_accel_drivers_nvidia_mig_gpu_index }}.service"
     enabled: true
+    masked: false
     daemon_reload: "{{ _edpm_accel_drivers_nvidia_mig_unit_installed.changed | default(false) | bool }}"
+
+- name: Disable edpm_nvidia_sriov_manage service for physical GPU {{ _edpm_accel_drivers_nvidia_mig_gpu_index }} (trigger only)
+  become: true
+  ansible.builtin.systemd:
+    name: "edpm_nvidia_sriov_manage@{{ _edpm_accel_drivers_nvidia_mig_bdf_sriov }}.service"
+    enabled: false
+    masked: false
+    daemon_reload: "{{ _edpm_accel_drivers_nvidia_sriov_manage_service_installed.changed | default(false) | bool }}"
+
+- name: Enable and stop edpm_nvidia_sriov_manage path activation for physical GPU {{ _edpm_accel_drivers_nvidia_mig_gpu_index }} (for next reboot)
+  become: true
+  ansible.builtin.systemd:
+    name: "edpm_nvidia_sriov_manage@{{ _edpm_accel_drivers_nvidia_mig_bdf_sriov }}.path"
+    enabled: true
+    masked: false
+    state: stopped
+    daemon_reload: "{{ _edpm_accel_drivers_nvidia_sriov_manage_path_installed.changed | default(false) | bool }}"
 
 - name: Reset and apply MIG layout if there are changes to the unit file
   when: _edpm_accel_drivers_nvidia_mig_unit_installed.changed | bool
@@ -50,8 +68,50 @@
         cmd: nvidia-smi -i {{ _edpm_accel_drivers_nvidia_mig_gpu_index }} -mig 0
       changed_when: true
 
+    # A hardware reset during the MIG disable step causes the underlying GPU device to transiently drop from the sysfs tree.
+    # This blip triggers a dependency failure in the strict systemd path unit before the hardware can stabilize and self-correct
+    # a few moments later. We don't want to relax cross-units dependencies, we retry a few times to give it time to stabilize.
     - name: Restart edpm_nvidia_mig_apply service after unit file change
       become: true
       ansible.builtin.systemd:
         name: "edpm_nvidia_mig_apply_{{ _edpm_accel_drivers_nvidia_mig_gpu_index }}"
         state: restarted
+      register: _edpm_accel_drivers_nvidia_mig_restart_result
+      until: _edpm_accel_drivers_nvidia_mig_restart_result is success
+      retries: 5
+      delay: 3
+
+- name: Get PCI BDF for 1st VF
+  become: true
+  ansible.builtin.command:
+    cmd: readlink -e /sys/bus/pci/devices/{{ _edpm_accel_drivers_nvidia_mig_bdf_sriov }}/virtfn0
+  register: _edpm_accel_drivers_nvidia_mig_vf0_pci_address
+  changed_when: false
+  failed_when:
+    not (_edpm_accel_drivers_nvidia_mig_vf0_pci_address.stdout | trim).split('/')[-1]
+    .startswith(_edpm_accel_drivers_nvidia_mig_bdf_sriov_base) or
+    _edpm_accel_drivers_nvidia_mig_vf0_pci_address.rc != 0
+
+- name: Set fact for 1st VF PCI address
+  ansible.builtin.set_fact:
+    _edpm_accel_drivers_nvidia_mig_vf0_bdf: "{{ (_edpm_accel_drivers_nvidia_mig_vf0_pci_address.stdout | trim).split('/')[-1] }}"
+
+- name: Install systemd unit to cause MIG apply to run when 1st VF appears
+  become: true
+  register: _edpm_accel_drivers_nvidia_mig_apply_path_installed
+  ansible.builtin.template:
+    src: edpm_nvidia_mig_apply.path.j2
+    dest: "/etc/systemd/system/edpm_nvidia_mig_apply_{{ _edpm_accel_drivers_nvidia_mig_gpu_index }}.path"
+    mode: '0644'
+  vars:
+    bdf: "{{ _edpm_accel_drivers_nvidia_mig_bdf_sriov }}"
+    vf0_bdf: "{{ _edpm_accel_drivers_nvidia_mig_vf0_bdf }}"
+
+- name: Enable and stop edpm_nvidia_mig_apply path activation for GPU {{ _edpm_accel_drivers_nvidia_mig_gpu_index }} (for next reboot)
+  become: true
+  ansible.builtin.systemd:
+    name: "edpm_nvidia_mig_apply_{{ _edpm_accel_drivers_nvidia_mig_gpu_index }}.path"
+    enabled: true
+    masked: false
+    state: stopped
+    daemon_reload: "{{ _edpm_accel_drivers_nvidia_mig_apply_path_installed.changed | default(false) | bool }}"
