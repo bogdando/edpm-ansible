@@ -1,5 +1,7 @@
 [Unit]
 Before=edpm_libvirt.target
+After=edpm_nvidia_sriov_manage.target
+Wants=edpm_nvidia_sriov_manage.target
 Description = Wait for a 1st VF to appear before running MIG apply
 
 [Path]

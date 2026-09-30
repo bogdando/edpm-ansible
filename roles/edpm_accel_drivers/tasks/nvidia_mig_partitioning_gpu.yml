@@ -11,12 +11,11 @@
     geometry: "{{ _edpm_accel_drivers_nvidia_mig_geometry }}"
     bdf: "{{ _edpm_accel_drivers_nvidia_mig_bdf_sriov }}"
 
-- name: Enable edpm_nvidia_mig_apply service for GPU {{ _edpm_accel_drivers_nvidia_mig_gpu_index }}
+- name: Disable (trigger only) edpm_nvidia_mig_apply service for GPU {{ _edpm_accel_drivers_nvidia_mig_gpu_index }}
   become: true
   ansible.builtin.systemd:
     name: "edpm_nvidia_mig_apply_{{ _edpm_accel_drivers_nvidia_mig_gpu_index }}.service"
-    enabled: true
-    state: started
+    enabled: false
     masked: false
     daemon_reload: "{{ _edpm_accel_drivers_nvidia_mig_unit_installed.changed | default(false) | bool }}"
 
@@ -51,8 +50,8 @@
     cmd: nvidia-smi -i {{ _edpm_accel_drivers_nvidia_mig_gpu_index }} -mig 0
   changed_when: true
 
-- name: Restart edpm_nvidia_mig_apply service to apply layout
+- name: Restart edpm_nvidia_mig_apply service to apply layout edpm service install time
   become: true
   ansible.builtin.systemd:
-    name: "edpm_nvidia_mig_apply_{{ _edpm_accel_drivers_nvidia_mig_gpu_index }}"
+    name: "edpm_nvidia_mig_apply_{{ _edpm_accel_drivers_nvidia_mig_gpu_index }}.service"
     state: restarted

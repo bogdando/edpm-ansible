@@ -2,6 +2,7 @@
 After = nvidia-vgpu-mgr.service
 After = nvidia-vgpud.service
 After = systemd-udevd.service
+Before = edpm_nvidia_sriov_manage.target
 Description = Wait for sriov_numvfs to exist before running sriov-manage
 
 [Path]

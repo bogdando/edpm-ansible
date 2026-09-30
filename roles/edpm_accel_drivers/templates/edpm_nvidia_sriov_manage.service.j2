@@ -2,6 +2,7 @@
 After = nvidia-vgpu-mgr.service
 After = nvidia-vgpud.service
 After = systemd-udevd.service
+Before = edpm_nvidia_sriov_manage.target
 Description = Enable Nvidia GPU virtual functions. Should be triggered via edpm_nvidia_sriov_manage_{{ idx }}.path to ensure GPU is ready for sriov operations.
 [Service]
 Type = oneshot
